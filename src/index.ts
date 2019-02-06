@@ -17,15 +17,22 @@ import chalk from 'chalk';
 import * as opn from 'opn';
 import * as cors from 'cors';
 import * as bodyParser from 'body-parser';
-import { pick } from 'lodash';
+import {pick} from 'lodash';
 import * as yargs from 'yargs';
 
-import { fakeSchema } from './fake_schema';
-import { proxyMiddleware } from './proxy';
-import { existsSync } from './utils';
+import {fakeSchema} from './fake_schema';
+import {existsSync} from './utils';
+
+const DEFAULT_SCHEMA_DIR = 'schemas';
 
 const argv = yargs
-  .command('$0 [file]', '', cmd => cmd.options({
+  .command('$0', '', cmd => cmd.options({
+    'ENABLE_EDIT_MODE': {
+      alias: 'E',
+      describe: 'Enable editing schema',
+      type: 'boolean',
+      default: true,
+    },
     'port': {
       alias: 'p',
       describe: 'HTTP Port',
@@ -43,24 +50,6 @@ const argv = yargs
       describe: 'CORS: Specify the custom origin for the Access-Control-Allow-Origin header, by default it is the same as `Origin` header from the request',
       type: 'string',
       requiresArg: true,
-    },
-    'extend': {
-      alias: 'e',
-      describe: 'URL to existing GraphQL server to extend',
-      type: 'string',
-      requiresArg: true,
-    },
-    'header': {
-      alias: 'H',
-      describe: 'Specify headers to the proxied server in cURL format, e.g.: "Authorization: bearer XXXXXXXXX"',
-      type: 'string',
-      requiresArg: true,
-      implies: 'extend',
-    },
-    'forward-headers': {
-      describe: 'Specify which headers should be forwarded to the proxied server',
-      type: 'array',
-      implies: 'extend',
     },
   }))
   .strict()
@@ -81,6 +70,11 @@ const argv = yargs
 
 
 const log = console.log;
+
+const ENV_ENABLE_EDIT_MODE = process.env.ENABLE_EDIT_MODE;
+const ENABLE_EDIT_MODE = ENV_ENABLE_EDIT_MODE !== undefined ? parseBoolean(ENV_ENABLE_EDIT_MODE) : argv.ENABLE_EDIT_MODE;
+
+log(chalk.magenta(`ENABLE_EDIT_MODE=${ENABLE_EDIT_MODE}`));
 
 let headers = {};
 if (argv.header) {
@@ -104,105 +98,114 @@ const fileName = argv.file || (argv.extend ?
 
 if (!argv.file) {
   log(chalk.yellow(`Default file ${chalk.magenta(fileName)} is used. ` +
-  `Specify [file] parameter to change.`));
+    `Specify [file] parameter to change.`));
 }
 
 const fakeDefinitionAST = readAST(path.join(__dirname, 'fake_definition.graphql'));
 const corsOptions = {}
 
-corsOptions['credentials'] =  true
-corsOptions['origin'] = argv.co ? argv.co : true
+corsOptions['credentials'] = true
+corsOptions['origin'] = argv.co ? argv.co : true;
 
-let userIDL;
-if (existsSync(fileName)) {
-  userIDL = readIDL(fileName);
-} else {
-  // different default IDLs for extend and non-extend modes
-  let defaultFileName = argv.e ? 'default-extend.graphql' : 'default-schema.graphql';
-  userIDL = readIDL(path.join(__dirname, defaultFileName));
+function parseBoolean(value) {
+  return !(value.toLowerCase() === 'false' || value === '0' || value.toLowerCase() === 'no');
 }
 
-function readIDL(filepath) {
-  return new Source(
-    fs.readFileSync(filepath, 'utf-8'),
-    filepath
-  );
+function readIDL(filePath) {
+  if (existsSync(filePath)) {
+    return new Source(
+      fs.readFileSync(filePath, 'utf-8'),
+      filePath
+    );
+  }
+  return null;
+}
+
+function getFilePathForSchema(schemaName) {
+  const fileName = schemaName ? `${schemaName}.graphql` : 'default.graphql';
+  return path.resolve(__dirname, DEFAULT_SCHEMA_DIR, fileName);
 }
 
 function readAST(filepath) {
   return parse(readIDL(filepath));
 }
 
-function saveIDL(idl) {
+function saveIDL(idl, fileName) {
   fs.writeFileSync(fileName, idl);
   log(`${chalk.green('✚')} schema saved to ${chalk.magenta(fileName)} on ${(new Date()).toLocaleString()}`);
   return new Source(idl, fileName);
 }
 
-if (argv.e) {
-  // run in proxy mode
-  const url = argv.e;
-  proxyMiddleware(url, headers)
-    .then(([schemaIDL, cb]) => {
-      schemaIDL = new Source(schemaIDL, `Inrospection from "${url}"`);
-      runServer(schemaIDL, userIDL, cb)
-    })
-    .catch(error => {
-      log(chalk.red(error.stack));
-      process.exit(1);
-    });
-} else {
-  runServer(userIDL, null, schema => {
-    fakeSchema(schema)
-    return {schema};
-  });
-}
+runServer(schema => {
+  fakeSchema(schema)
+  return {schema};
+});
 
 function buildServerSchema(idl) {
-  var ast = concatAST([parse(idl), fakeDefinitionAST]);
+  let ast = concatAST([parse(idl), fakeDefinitionAST]);
   return buildASTSchema(ast);
 }
 
-function runServer(schemaIDL: Source, extensionIDL: Source, optionsCB) {
+function runServer(optionsCB) {
   const app = express();
 
-  if (extensionIDL) {
-    const schema = buildServerSchema(schemaIDL);
-    extensionIDL.body = extensionIDL.body.replace('<RootTypeName>', schema.getQueryType().name);
-  }
-  app.options('/graphql', cors(corsOptions))
-  app.use('/graphql', cors(corsOptions), graphqlHTTP(req => {
+  app.options('/graphql/:schemaName?', cors(corsOptions))
+  app.use('/graphql/:schemaName?', cors(corsOptions), graphqlHTTP(req => {
+    const schemaName = req.params.schemaName;
+    const schemaIDL = readIDL(getFilePathForSchema(schemaName));
     const schema = buildServerSchema(schemaIDL);
     const forwardHeaders = pick(req.headers, forwardHeaderNames);
     return {
-      ...optionsCB(schema, extensionIDL, forwardHeaders),
+      ...optionsCB(schema, forwardHeaders),
       graphiql: true,
     };
   }));
 
-  app.get('/user-idl', (_, res) => {
-    res.status(200).json({
-      schemaIDL: schemaIDL.body,
-      extensionIDL: extensionIDL && extensionIDL.body,
-    });
+  app.get('/user-idl/:schemaName?', (req, res) => {
+    const schemaName = req.params.schemaName;
+    const filename = getFilePathForSchema(schemaName);
+    const schemaIDL = readIDL(filename);
+    if (schemaIDL) {
+      if (ENABLE_EDIT_MODE) {
+        res.status(200).json({
+          schemaIDL: schemaIDL.body,
+        });
+      } else {
+        res.status(200).json({
+          schemaIDL: schemaIDL.body,
+          editMode: false,
+        });
+      }
+
+    } else {
+      res.status(404).json({
+        error: `Schema "${schemaName}" not found...`,
+      });
+    }
   });
 
-  app.use('/user-idl', bodyParser.text({limit: '8mb'}));
+  app.use('/user-idl/:schemaName?', bodyParser.text({limit: '20mb'}));
 
-  app.post('/user-idl', (req, res) => {
+  app.post('/user-idl/:schemaName?', (req, res) => {
+    const schemaName = req.params.schemaName;
+    const schemaFileName = getFilePathForSchema(schemaName);
     try {
-      if (extensionIDL === null)
-        schemaIDL = saveIDL(req.body);
-      else
-        extensionIDL = saveIDL(req.body);
-
-      res.status(200).send('ok');
-    } catch(err) {
+      if (ENABLE_EDIT_MODE) {
+        saveIDL(req.body, schemaFileName);
+        res.status(200).send('ok');
+      } else {
+        res.status(400).send('Schema not editable. ENABLE_EDIT_MODE is false');
+      }
+    } catch (err) {
       res.status(500).send(err.message)
     }
   });
 
-  app.use('/editor', express.static(path.join(__dirname, 'editor')));
+  app.use(express.static(path.join(__dirname, 'editor'), {redirect: false}));
+
+  app.get('/editor/:schemaName?', (_, res) => {
+    res.sendFile(path.join(path.join(__dirname, 'editor') + '/index.html'));
+  });
 
   const server = app.listen(argv.port);
 

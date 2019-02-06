@@ -1,9 +1,7 @@
 FROM node:8.8.1-alpine
-
-ENTRYPOINT ["node", "/usr/local/bin/graphql-faker"]
-WORKDIR /workdir
-
+COPY ./package.json /app/package.json
+WORKDIR /app
+RUN yarn install --production
 EXPOSE 9002
-
-RUN yarn global add graphql-faker && \
-    yarn cache clean --force
+ENTRYPOINT ["node", "/app/index.js"]
+COPY ./dist /app

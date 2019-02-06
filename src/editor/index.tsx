@@ -24,6 +24,9 @@ type FakeEditorState = {
   schema: GraphQLSchema | null;
   dirtySchema: GraphQLSchema | null;
   proxiedSchemaIDL: string | null;
+  editorPath: string;
+  schemaName: string | null;
+  editMode: boolean;
 };
 
 class FakeEditor extends React.Component<any, FakeEditorState> {
@@ -41,14 +44,34 @@ class FakeEditor extends React.Component<any, FakeEditorState> {
       status: null,
       schema: null,
       proxiedSchemaIDL: null,
+      editorPath: this.getEditorPath(),
+      schemaName: this.extractSchemaName(),
+      editMode: false,
     };
   }
 
   componentDidMount() {
-    this.fetcher('/user-idl')
+    const schemaName = this.state.schemaName;
+    const endpoint = schemaName ? `/user-idl/${schemaName}` : '/user-idl';
+    this.fetcher(endpoint)
+      .then(response => {
+        if (response.status === 404) {
+          console.error(`Schema "${schemaName}" not found...`);
+          console.info('Redirecting to a default editor with a default.graphql schema' );
+          window.location.replace(this.state.editorPath);
+        }
+        return response;
+      })
       .then(response => response.json())
       .then(IDLs => {
-        this.updateValue(IDLs);
+        if (IDLs.editMode === false) {
+          this.setState({editMode: IDLs.editMode, activeTab: 1});
+          this.updateValue(IDLs);
+        } else {
+          this.setState({editMode: true});
+          this.updateValue(IDLs);
+        }
+
       });
 
     window.onbeforeunload = () => {
@@ -84,8 +107,28 @@ class FakeEditor extends React.Component<any, FakeEditorState> {
     this.updateIdl(value, true);
   }
 
+  getEditorPath() {
+    const segments = window.location.pathname
+        .split('/')
+        .slice(0, 2)
+        .join('/');
+    return `${location.origin}${segments}`;
+  }
+
+  extractSchemaName() {
+    const segments = window.location.pathname.split('/');
+    segments.shift();
+
+    if (segments.length > 1) {
+      return segments[1];
+    }
+    return '';
+  }
+
   postIDL(idl) {
-    return this.fetcher('/user-idl', {
+    const schemaName = this.state.schemaName;
+    const endpoint = schemaName ? `/user-idl/${schemaName}` : '/user-idl';
+    return this.fetcher(endpoint, {
       method: 'post',
       headers: { 'Content-Type': 'text/plain' },
       body: idl,
@@ -172,17 +215,13 @@ class FakeEditor extends React.Component<any, FakeEditorState> {
   };
 
   render() {
-    let { value, activeTab, schema , dirty, dirtySchema } = this.state;
+    let { value, activeTab, schema , dirty, dirtySchema, editMode } = this.state;
     return (
       <div className="faker-editor-container">
         <nav>
-          <div className="logo">
-            <a href="https://github.com/APIs-guru/graphql-faker" target="_blank">
-              {' '}
-              <img src="./logo.svg" />{' '}
-            </a>
-          </div>
+
           <ul>
+            {editMode &&
             <li
               onClick={() => this.switchTab(0)}
               className={classNames({
@@ -191,8 +230,9 @@ class FakeEditor extends React.Component<any, FakeEditorState> {
               })}
             >
               {' '}
-              <EditIcon />{' '}
+              <EditIcon/>{' '}
             </li>
+            }
             <li
               onClick={() => this.state.schema && this.switchTab(1)}
               className={classNames({
@@ -203,12 +243,7 @@ class FakeEditor extends React.Component<any, FakeEditorState> {
               {' '}
               <ConsoleIcon />{' '}
             </li>
-            <li className="-pulldown -link">
-              <a href="https://github.com/APIs-guru/graphql-faker" target="_blank">
-                {' '}
-                <GithubIcon />{' '}
-              </a>
-            </li>
+
           </ul>
         </nav>
         <div className="tabs-container">
